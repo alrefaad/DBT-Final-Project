@@ -1,11 +1,13 @@
 import time
 import duckdb
 
+# Constants
 SCALE = 1
 SAMPLE_SIZE = 2000
 MIN_SUPPORT = 5
 ALPHA = 0.20
 
+# Load TPC-H data and create a single table with the columns needed for our queries
 def loadData(con):
     con.execute("INSTALL tpch")
     con.execute("LOAD tpch")
@@ -34,6 +36,7 @@ def loadData(con):
         ON c.c_nationkey = n.n_nationkey
     """)
 
+# Create a directory of groups and their sizes
 def createGroupDirectory(con):
     return dict(con.execute("""
         SELECT c_nation, COUNT(*)
@@ -41,6 +44,7 @@ def createGroupDirectory(con):
         GROUP BY c_nation
     """).fetchall())
 
+# Create a skewed version of the TPC-H data by keeping all rows for the first 15 nations, and then sampling from the remaining nations with decreasing probabilities
 def createSkewedData(con):
     con.execute("""
         CREATE OR REPLACE TABLE tpch_skewed AS
@@ -65,8 +69,8 @@ def createSkewedData(con):
         ORDER BY c_nation
     """)
 
+# Create a stratified sample of the skewed data by keeping at most SAMPLE_SIZE rows from each nation
 def createStratifiedSample(con):
-    # Keep at most SAMPLE_SIZE rows from each nation
     con.execute(f"""
         CREATE OR REPLACE TABLE stratified_sample AS
         SELECT * EXCLUDE (row_num)
@@ -81,6 +85,7 @@ def createStratifiedSample(con):
         WHERE row_num <= {SAMPLE_SIZE}
     """)
 
+# Create a uniform sample with the same number of rows as the stratified sample
 def createUniformSample(con):
     sample_size = con.execute(
         "SELECT COUNT(*) FROM stratified_sample"
@@ -93,6 +98,7 @@ def createUniformSample(con):
         USING SAMPLE {sample_size} ROWS
     """)
 
+# Detect and repair thin or missing groups in the sample
 def detectAndRepair(con, where, group_directory):
     start = time.perf_counter()
 
@@ -105,17 +111,23 @@ def detectAndRepair(con, where, group_directory):
         if nation not in results or results[nation][1] < MIN_SUPPORT
     ]
 
+    # Calculate the repair ratio
     flagged_rows = sum(group_directory[nation] for nation in flagged)
     repair_ratio = flagged_rows / sum(group_directory.values())
 
-    # Too much data needs repair, so just run exact
+    # If no groups are flagged, return the sample results and runtime
+    if not flagged:
+        runtime = (time.perf_counter() - start) * 1000
+        return sample, runtime, flagged, repair_ratio, "Approximate Only"
+
+    # Too much data needs repair so run exact
     if repair_ratio > ALPHA:
         result, _ = runQuery(con, "tpch_skewed", where)
         runtime = (time.perf_counter() - start) * 1000
 
-        return result, runtime, len(flagged), repair_ratio, "Full Exact"
+        return result, runtime, flagged, repair_ratio, "Full Exact"
 
-    # Repair flagged groups only
+    # Repair flagged groups
     if flagged:
         nations = ", ".join(f"'{nation}'" for nation in flagged)
 
@@ -139,8 +151,9 @@ def detectAndRepair(con, where, group_directory):
 
     runtime = (time.perf_counter() - start) * 1000
 
-    return result, runtime, len(flagged), repair_ratio, "Selective Repair"
+    return result, runtime, flagged, repair_ratio, "Selective Repair"
 
+# Run a query on the given table and return the results and runtime
 def runQuery(con, table, where):
     start = time.perf_counter()
 
@@ -158,6 +171,7 @@ def runQuery(con, table, where):
 
     return result, runtime
 
+# Compare the results of the sample and exact queries and print statistics
 def compareResults(con, name, where, table):
     exact, exact_time = runQuery(con, "tpch_skewed", where)
     sample, sample_time = runQuery(con, table, where)
@@ -199,6 +213,7 @@ def compareResults(con, name, where, table):
     print("Exact time:", f"{exact_time:.2f} ms")
     print()
 
+# Compare the results of the sample and exact queries, repair thin or missing groups, and print statistics
 def compareRepair(con, name, where, group_directory):
     exact, exact_time = runQuery(con, "tpch_skewed", where)
 
@@ -206,23 +221,24 @@ def compareRepair(con, name, where, group_directory):
         con, where, group_directory
     )
 
-    repaired_dict = {nation: avg for nation, avg, support in repaired}
+    repaired_dict = {
+        nation: avg
+        for nation, avg, support in repaired
+    }
 
     missing = 0
     total_error = 0
-
     for nation, exact_avg, support in exact:
         if nation not in repaired_dict:
             missing += 1
             total_error += 1
         else:
             total_error += abs(repaired_dict[nation] - exact_avg) / exact_avg
-
     average_error = total_error / len(exact)
 
     print(name, "- Detect-and-Repair")
     print("Mode:", mode)
-    print("Flagged groups:", flagged)
+    print("Flagged groups:", len(flagged))
     print("Repair ratio:", f"{ratio:.2%}")
     print("Missing groups:", missing)
     print("Average error:", f"{average_error:.2%}")
@@ -230,26 +246,25 @@ def compareRepair(con, name, where, group_directory):
     print("Exact time:", f"{exact_time:.2f} ms")
     print()
 
+# Main function to run the entire process
 def main():
+    # Connect to DuckDB and load data
     con = duckdb.connect()
-
     loadData(con)
+
+    # Create skewed data, stratified sample, uniform sample, and group directory
     createSkewedData(con)
     createStratifiedSample(con)
     createUniformSample(con)
     groupDirectory = createGroupDirectory(con)
 
-    print("Full rows:",
-          con.execute("SELECT COUNT(*) FROM tpch_skewed").fetchone()[0])
-
-    print("Stratified Sample rows:",
-          con.execute("SELECT COUNT(*) FROM stratified_sample").fetchone()[0])
-
-    print("Uniform sample rows:",
-      con.execute("SELECT COUNT(*) FROM uniform_sample").fetchone()[0])
-
+    # Print the number of rows in each table
+    print("Full rows:", con.execute("SELECT COUNT(*) FROM tpch_skewed").fetchone()[0])
+    print("Stratified Sample rows:", con.execute("SELECT COUNT(*) FROM stratified_sample").fetchone()[0])
+    print("Uniform sample rows:", con.execute("SELECT COUNT(*) FROM uniform_sample").fetchone()[0])
     print()
 
+    # Define the filters to be used in the queries
     filters = [
         ("No Filter",
          "TRUE"),
@@ -282,11 +297,13 @@ def main():
             AND l_discount >= 0.08""")
     ]
 
+    # Run the queries for each filter and compare the results
     for name, where in filters:
         compareResults(con, name, where, "uniform_sample")
         compareResults(con, name, where, "stratified_sample")
         compareRepair(con, name, where, groupDirectory)
 
+    # Close the DuckDB connection
     con.close()
 
 if __name__ == "__main__":
