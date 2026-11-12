@@ -2,7 +2,7 @@ import time
 import duckdb
 
 # Constants
-SCALE = 1
+SCALE = 2
 SAMPLE_SIZE = 2000
 MIN_SUPPORT = 5
 ALPHA = 0.20
