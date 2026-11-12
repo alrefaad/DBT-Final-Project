@@ -28,12 +28,9 @@ def loadData(con):
             c.c_mktsegment,
             n.n_name AS c_nation
         FROM lineitem l
-        JOIN orders o
-        ON l.l_orderkey = o.o_orderkey
-        JOIN customer c
-        ON o.o_custkey = c.c_custkey
-        JOIN nation n
-        ON c.c_nationkey = n.n_nationkey
+        JOIN orders o ON l.l_orderkey = o.o_orderkey
+        JOIN customer c ON o.o_custkey = c.c_custkey
+        JOIN nation n ON c.c_nationkey = n.n_nationkey
     """)
 
 # Create a directory of groups and their sizes
@@ -49,23 +46,15 @@ def createSkewedData(con):
     con.execute("""
         CREATE OR REPLACE TABLE tpch_skewed AS
         WITH ranked AS (
-            SELECT *,
-                   DENSE_RANK() OVER (ORDER BY c_nation) AS nation_rank
+            SELECT *, DENSE_RANK() OVER (ORDER BY c_nation) AS nation_rank
             FROM tpch_data
         )
         SELECT * EXCLUDE (nation_rank)
         FROM ranked
         WHERE nation_rank <= 15
-
-           OR (nation_rank BETWEEN 16 AND 20
-               AND hash(l_orderkey, l_linenumber) % 4 = 0)
-
-           OR (nation_rank BETWEEN 21 AND 23
-               AND hash(l_orderkey, l_linenumber) % 100 = 0)
-
-           OR (nation_rank >= 24
-               AND hash(l_orderkey, l_linenumber) % 1000 = 0)
-
+            OR (nation_rank BETWEEN 16 AND 20 AND hash(l_orderkey, l_linenumber) % 4 = 0)
+            OR (nation_rank BETWEEN 21 AND 23 AND hash(l_orderkey, l_linenumber) % 100 = 0)
+            OR (nation_rank >= 24 AND hash(l_orderkey, l_linenumber) % 1000 = 0)
         ORDER BY c_nation
     """)
 
@@ -75,8 +64,7 @@ def createStratifiedSample(con):
         CREATE OR REPLACE TABLE stratified_sample AS
         SELECT * EXCLUDE (row_num)
         FROM (
-            SELECT *,
-                ROW_NUMBER() OVER (
+            SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY c_nation
                     ORDER BY hash(l_orderkey, l_linenumber)
                 ) AS row_num
@@ -132,12 +120,9 @@ def detectAndRepair(con, where, group_directory):
         nations = ", ".join(f"'{nation}'" for nation in flagged)
 
         repaired = con.execute(f"""
-            SELECT c_nation,
-                   AVG(l_extendedprice),
-                   COUNT(*)
+            SELECT c_nation, AVG(l_extendedprice), COUNT(*)
             FROM tpch_skewed
-            WHERE ({where})
-              AND c_nation IN ({nations})
+            WHERE ({where}) AND c_nation IN ({nations})
             GROUP BY c_nation
         """).fetchall()
 
@@ -158,9 +143,7 @@ def runQuery(con, table, where):
     start = time.perf_counter()
 
     result = con.execute(f"""
-        SELECT c_nation,
-               AVG(l_extendedprice) AS avg_price,
-               COUNT(*) AS support
+        SELECT c_nation, AVG(l_extendedprice) AS avg_price, COUNT(*) AS support
         FROM {table}
         WHERE {where}
         GROUP BY c_nation
@@ -266,35 +249,26 @@ def main():
 
     # Define the filters to be used in the queries
     filters = [
-        ("No Filter",
+        ("No Filter", 
          "TRUE"),
 
-        ("AIR",
+        ("AIR", 
          "l_shipmode = 'AIR'"),
 
-        ("AIR + Quantity",
+        ("AIR + Quantity", 
          "l_shipmode = 'AIR' AND l_quantity > 45"),
 
         ("AIR + Quantity + Year Range",
-        """l_shipmode = 'AIR'
-            AND l_quantity > 45
-            AND o_year BETWEEN 1994 AND 1996"""),
+         "l_shipmode = 'AIR' AND l_quantity > 45 AND o_year BETWEEN 1994 AND 1996"),
 
         ("AIR + Quantity + Year",
          "l_shipmode = 'AIR' AND l_quantity > 45 AND o_year = 1995"),
 
         ("AIR + Quantity + Year + Segment",
-         """l_shipmode = 'AIR'
-            AND l_quantity > 45
-            AND o_year = 1995
-            AND c_mktsegment = 'BUILDING'"""),
+         "l_shipmode = 'AIR' AND l_quantity > 45 AND o_year = 1995 AND c_mktsegment = 'BUILDING'"),
 
         ("Most Selective",
-         """l_shipmode = 'AIR'
-            AND l_quantity > 45
-            AND o_year = 1995
-            AND c_mktsegment = 'BUILDING'
-            AND l_discount >= 0.08""")
+         "l_shipmode = 'AIR' AND l_quantity > 45 AND o_year = 1995 AND c_mktsegment = 'BUILDING' AND l_discount >= 0.08")
     ]
 
     # Run the queries for each filter and compare the results
